@@ -1,1 +1,57 @@
+name: Build APK
 
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # اگر train_app.zip در ریشه‌ی ریپو باشد، باز می‌شود؛ وگرنه فایل‌های ریشه استفاده می‌شوند.
+      - name: Find source
+        id: src
+        run: |
+          if [ -f train_app.zip ]; then
+            unzip -q -o train_app.zip -d _src
+            echo "dir=_src/train_app" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create android folder
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: flutter create --platforms=android --project-name train_app .
+
+      - name: Add INTERNET permission
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          f=android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.INTERNET' "$f" || \
+            sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$f"
+
+      - name: Get packages
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: flutter pub get
+
+      - name: Build APK
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: train-app-apk
+          path: ${{ steps.src.outputs.dir }}/build/app/outputs/flutter-apk/app-release.apk
