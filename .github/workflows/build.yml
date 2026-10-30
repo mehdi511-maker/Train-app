@@ -45,6 +45,15 @@ jobs:
           grep -q 'android.permission.INTERNET' "$f" || \
             sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$f"
 
+      - name: Apply app name and icon
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          f=android/app/src/main/AndroidManifest.xml
+          sed -i 's|android:label="[^"]*"|android:label="ریل‌پیما"|' "$f"
+          cp -r android_res/. android/app/src/main/res/
+          grep -n 'android:label' "$f"
+          ls android/app/src/main/res/mipmap-xxxhdpi
+
       - name: Get packages
         working-directory: ${{ steps.src.outputs.dir }}
         run: flutter pub get
