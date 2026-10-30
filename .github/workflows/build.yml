@@ -17,9 +17,11 @@ jobs:
       - name: Find source
         id: src
         run: |
-          if [ -f train_app.zip ]; then
-            unzip -q -o train_app.zip -d _src
-            echo "dir=_src/train_app" >> "$GITHUB_OUTPUT"
+          zip=$(ls *.zip 2>/dev/null | head -1)
+          if [ -n "$zip" ]; then
+            unzip -q -o "$zip" -d _src
+            dir=$(find _src -maxdepth 2 -name pubspec.yaml -printf '%h\n' | head -1)
+            echo "dir=${dir:-_src/train_app}" >> "$GITHUB_OUTPUT"
           else
             echo "dir=." >> "$GITHUB_OUTPUT"
           fi
@@ -51,12 +53,13 @@ jobs:
           f=android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="[^"]*"|android:label="ریل‌پیما"|' "$f"
           if [ -d android_res ]; then
-  cp -r android_res/. android/app/src/main/res/
-else
-  echo "android_res not found"
-fi
+            cp -r android_res/. android/app/src/main/res/
+            echo "Icons copied from android_res/"
+          else
+            echo "android_res/ not found — using default Flutter icon"
+          fi
           grep -n 'android:label' "$f"
-          ls android/app/src/main/res/mipmap-xxxhdpi
+          ls android/app/src/main/res/mipmap-xxxhdpi 2>/dev/null || echo "No custom mipmap icons"
 
       - name: Get packages
         working-directory: ${{ steps.src.outputs.dir }}
