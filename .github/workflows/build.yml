@@ -50,7 +50,11 @@ jobs:
         run: |
           f=android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="[^"]*"|android:label="ریل‌پیما"|' "$f"
-          cp -r android_res/. android/app/src/main/res/
+          if [ -d android_res ]; then
+  cp -r android_res/. android/app/src/main/res/
+else
+  echo "android_res not found"
+fi
           grep -n 'android:label' "$f"
           ls android/app/src/main/res/mipmap-xxxhdpi
 
