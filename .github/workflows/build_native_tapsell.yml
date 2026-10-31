@@ -1,0 +1,282 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Locate source directly, inside train_app/, or inside any uploaded ZIP.
+      - name: Find and extract Flutter source
+        id: src
+        shell: bash
+        run: |
+          set -e
+          mkdir -p _src
+          shopt -s nullglob
+          for archive in ./*.zip; do
+            echo "Extracting $archive"
+            dest="_src/$(basename "${archive%.zip}")"
+            mkdir -p "$dest"
+            unzip -q -o "$archive" -d "$dest"
+          done
+          PUBSPEC=$(find . -type f -name pubspec.yaml \
+            -not -path './.git/*' \
+            -not -path './.dart_tool/*' \
+            -print -quit)
+          if [ -z "$PUBSPEC" ]; then
+            echo "Flutter project not found. Repository contents:"
+            find . -maxdepth 4 -type f | head -100
+            echo "No pubspec.yaml was found in the repository or extracted ZIP files." >&2
+            exit 1
+          fi
+          SRC="$(dirname "$PUBSPEC")"
+          echo "dir=$SRC" >> "$GITHUB_OUTPUT"
+          echo "Found Flutter project at: $SRC"
+          ls -la "$SRC"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.38.1"
+          cache: true
+
+      - name: Create Android platform files
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: flutter create --platforms=android --project-name train_app .
+
+      - name: Pin Gradle wrapper
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          f=android/gradle/wrapper/gradle-wrapper.properties
+          test -f "$f"
+          sed -i 's#^distributionUrl=.*#distributionUrl=https\://services.gradle.org/distributions/gradle-8.13-all.zip#' "$f"
+          grep '^distributionUrl=' "$f"
+
+      - name: Align Android Gradle Plugin and Kotlin versions
+        working-directory: ${{ steps.src.outputs.dir }}
+        shell: bash
+        run: |
+          f=android/settings.gradle
+          if [ -f "$f" ]; then
+            sed -i -E 's/(com\.android\.application" version ")[^"]+(" apply false)/\18.12.1\2/' "$f"
+            sed -i -E 's/(org\.jetbrains\.kotlin\.android" version ")[^"]+(" apply false)/\12.2.0\2/' "$f"
+          else
+            f=android/settings.gradle.kts
+            sed -i -E 's/(com\.android\.application" version ")[^"]+(" apply false)/\18.12.1\2/' "$f"
+            sed -i -E 's/(org\.jetbrains\.kotlin\.android" version ")[^"]+(" apply false)/\12.2.0\2/' "$f"
+          fi
+          grep -E 'com.android.application|org.jetbrains.kotlin.android' "$f"
+
+      - name: Set Android application id
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          f=android/app/build.gradle
+          if [ -f "$f" ]; then
+            sed -i 's/applicationId "[^"]*"/applicationId "ir.railpeyma.app"/' "$f"
+          else
+            f=android/app/build.gradle.kts
+            sed -i 's/applicationId = "[^"]*"/applicationId = "ir.railpeyma.app"/' "$f"
+          fi
+
+      - name: Add native Tapsell Mediation SDK (Android)
+        working-directory: ${{ steps.src.outputs.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Add Tapsell's Maven repository to dependency resolution.
+          SETTINGS=android/settings.gradle
+          [ -f "$SETTINGS" ] || SETTINGS=android/settings.gradle.kts
+          if ! grep -q 'maven.tapsell.ir' "$SETTINGS"; then
+            python3 - "$SETTINGS" <<'PYSET'
+          import pathlib,sys
+          p=pathlib.Path(sys.argv[1]); s=p.read_text()
+          needle='repositories {'
+          if needle not in s: raise SystemExit('Could not find repositories block in '+str(p))
+          s=s.replace(needle, needle+'\n        maven { url = uri("https://maven.tapsell.ir") }', 1)
+          p.write_text(s)
+          PYSET
+          fi
+          APP=android/app/build.gradle
+          if [ -f "$APP" ]; then
+            python3 - "$APP" <<'PYGR'
+          import pathlib,sys
+          p=pathlib.Path(sys.argv[1]); s=p.read_text()
+          # Manifest key is the same Tapsell key supplied by the publisher.
+          s=s.replace('defaultConfig {', '''defaultConfig {
+                  manifestPlaceholders = [TapsellMediationAppKey: "idmebrhsdqqfmfldfejttnanopepqpoblmobophgtseqcmpntarsckbmqkbkncdfnjstit"]''', 1)
+          if 'ir.tapsell:tapsell:' not in s:
+              s += '''\n\ndependencies {
+              implementation 'ir.tapsell:tapsell:1.3.0'
+              implementation 'ir.tapsell.mediation.adapter:legacy:1.3.0'
+          }
+          '''
+          p.write_text(s)
+          PYGR
+          else
+            APP=android/app/build.gradle.kts
+            python3 - "$APP" <<'PYKTS'
+          import pathlib,sys
+          p=pathlib.Path(sys.argv[1]); s=p.read_text()
+          s=s.replace('defaultConfig {', '''defaultConfig {
+                  manifestPlaceholders["TapsellMediationAppKey"] = "idmebrhsdqqfmfldfejttnanopepqpoblmobophgtseqcmpntarsckbmqkbkncdfnjstit"''', 1)
+          if 'ir.tapsell:tapsell:' not in s:
+              s += '''\n\ndependencies {
+              implementation("ir.tapsell:tapsell:1.3.0")
+              implementation("ir.tapsell.mediation.adapter:legacy:1.3.0")
+          }
+          '''
+          p.write_text(s)
+          PYKTS
+          fi
+          # Android 13+ advertising identifier permission.
+          M=android/app/src/main/AndroidManifest.xml
+          grep -q 'com.google.android.gms.permission.AD_ID' "$M" || \
+            sed -i 's|<application|<uses-permission android:name="com.google.android.gms.permission.AD_ID"/>\n    <application|' "$M"
+          # Replace generated launcher with a FlutterActivity that hosts the native banner.
+          K=$(find android/app/src/main -name MainActivity.kt -o -name MainActivity.java | head -1)
+          if [ -z "$K" ]; then echo 'MainActivity not found' >&2; exit 1; fi
+          PKG=$(grep -m1 '^package ' "$K" | sed 's/^package //;s/;//')
+          mkdir -p "$(dirname "$K")"
+          cat > "$K" <<KOTLIN
+          package $PKG
+          
+          import android.os.Bundle
+          import android.util.Log
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.FrameLayout
+          import io.flutter.embedding.android.FlutterActivity
+          import ir.tapsell.mediation.Tapsell
+          import ir.tapsell.mediation.ad.AdStateListener
+          import ir.tapsell.mediation.ad.request.BannerSize
+          import ir.tapsell.mediation.ad.request.RequestResultListener
+          import ir.tapsell.mediation.ad.views.banner.BannerContainer
+          
+          class MainActivity : FlutterActivity() {
+              private var bannerContainer: BannerContainer? = null
+              private var bannerAdId: String? = null
+              private var bannerRequested = false
+              private val zoneId = "6ae4e2c77ae48b79af14cf45"
+          
+              override fun onPostResume() {
+                  super.onPostResume()
+                  if (!bannerRequested) {
+                      bannerRequested = true
+                      window.decorView.postDelayed({ requestNativeBannerSafely() }, 1200)
+                  }
+              }
+          
+              private fun requestNativeBannerSafely() {
+                  try {
+                      Tapsell.requestBannerAd(zoneId, BannerSize.BANNER_320_50,
+                          object : RequestResultListener {
+                              override fun onSuccess(adId: String) {
+                                  runOnUiThread { showNativeBannerSafely(adId) }
+                              }
+                              override fun onFailure(message: String) {
+                                  Log.w("RailpeymaTapsell", "Banner request failed: $message")
+                              }
+                          })
+                  } catch (t: Throwable) {
+                      Log.e("RailpeymaTapsell", "Banner request exception", t)
+                  }
+              }
+          
+              private fun showNativeBannerSafely(adId: String) {
+                  try {
+                      val content = findViewById<ViewGroup>(android.R.id.content)
+                      val container = BannerContainer(this)
+                      val overlay = FrameLayout(this)
+                      overlay.isClickable = false
+                      overlay.addView(container, FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.WRAP_CONTENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT,
+                          Gravity.CENTER
+                      ))
+                      content.addView(overlay, FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          dp(56),
+                          Gravity.BOTTOM
+                      ))
+                      bannerContainer = container
+                      bannerAdId = adId
+                      Tapsell.showBannerAd(adId, container, this, object : AdStateListener.Banner {
+                          override fun onAdImpression() { Log.d("RailpeymaTapsell", "Banner impression") }
+                          override fun onAdClicked() { Log.d("RailpeymaTapsell", "Banner clicked") }
+                          override fun onAdFailed(message: String) {
+                              Log.w("RailpeymaTapsell", "Banner show failed: $message")
+                              runOnUiThread { overlay.visibility = View.GONE }
+                          }
+                      })
+                  } catch (t: Throwable) {
+                      Log.e("RailpeymaTapsell", "Banner display exception", t)
+                  }
+              }
+          
+              private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+          
+              override fun onDestroy() {
+                  try { bannerAdId?.let { Tapsell.destroyBannerAd(it) } }
+                  catch (t: Throwable) { Log.w("RailpeymaTapsell", "Banner destroy failed", t) }
+                  super.onDestroy()
+              }
+          }
+          KOTLIN
+          echo "Native Tapsell integration prepared in $K"
+
+      - name: Add INTERNET permission and app label
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          f=android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.INTERNET' "$f" || \
+            sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$f"
+          sed -i 's|android:label="[^"]*"|android:label="ریل‌پیما"|' "$f"
+          if [ -d android_res ]; then
+            mkdir -p android/app/src/main/res
+            cp -r android_res/. android/app/src/main/res/
+          fi
+
+      - name: Get packages
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: flutter pub get
+
+      - name: Build APK
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: flutter build apk --release
+
+      - name: Sign APK with release key
+        if: env.KS_B64 != ''
+        working-directory: ${{ steps.src.outputs.dir }}
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          "$APKSIGNER" sign --ks "$RUNNER_TEMP/release.jks" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KS_PASS --key-pass env:KEY_PASS \
+            --out "$RUNNER_TEMP/signed.apk" "$APK"
+          "$APKSIGNER" verify --print-certs "$RUNNER_TEMP/signed.apk" | head -3
+          mv "$RUNNER_TEMP/signed.apk" "$APK"
+          rm -f "$RUNNER_TEMP/release.jks"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: train-app-apk
+          path: ${{ steps.src.outputs.dir }}/build/app/outputs/flutter-apk/app-release.apk
