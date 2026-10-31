@@ -47,7 +47,7 @@ jobs:
 
       - name: Generate Android project
         working-directory: ${{ steps.src.outputs.dir }}
-        run: flutter create --platforms=android --project-name railpeyma_diagnostic_fixed .
+        run: flutter create --platforms=android --project-name train_app .
 
       - name: Configure Android Gradle versions
         working-directory: ${{ steps.src.outputs.dir }}
