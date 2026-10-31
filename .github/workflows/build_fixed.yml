@@ -1,0 +1,128 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # اگر train_app.zip در ریشه‌ی ریپو باشد، باز می‌شود؛ وگرنه فایل‌های ریشه استفاده می‌شوند.
+      - name: Find source
+        id: src
+        run: |
+          if [ -f train_app.zip ]; then
+            unzip -q -o train_app.zip -d _src
+          fi
+          if [ -f _src/train_app/pubspec.yaml ]; then
+            SRC="_src/train_app"
+          elif [ -f train_app/pubspec.yaml ]; then
+            SRC="train_app"
+          elif [ -f pubspec.yaml ]; then
+            SRC="."
+          else
+            echo "Flutter project not found: pubspec.yaml is missing" >&2
+            exit 1
+          fi
+          echo "dir=$SRC" >> "$GITHUB_OUTPUT"
+          echo "Using Flutter project: $SRC"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          # Keep Flutter and the generated Android toolchain compatible with
+          # tapsell_plus 2.3.2 / google_mobile_ads 4.0.0.
+          flutter-version: "3.24.5"
+          cache: true
+
+      - name: Create android folder
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: flutter create --platforms=android --project-name train_app .
+
+      # google_mobile_ads 4.0.0 uses Gradle APIs removed in Gradle 9.
+      # Force the wrapper to Gradle 8.3 (compatible with Flutter 3.24.5's AGP 8.1.x).
+      - name: Pin Gradle wrapper
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          f=android/gradle/wrapper/gradle-wrapper.properties
+          test -f "$f"
+          sed -i 's#^distributionUrl=.*#distributionUrl=https\://services.gradle.org/distributions/gradle-8.3-all.zip#' "$f"
+          grep '^distributionUrl=' "$f"
+
+      - name: Set Android application id
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          f=android/app/build.gradle
+          if [ -f "$f" ]; then
+            sed -i 's/applicationId "[^"]*"/applicationId "ir.railpeyma.app"/' "$f"
+          else
+            f=android/app/build.gradle.kts
+            sed -i 's/applicationId = "[^"]*"/applicationId = "ir.railpeyma.app"/' "$f"
+          fi
+
+      - name: Add INTERNET permission
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          f=android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.INTERNET' "$f" || \
+            sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$f"
+
+      - name: Apply app name and icon
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          f=android/app/src/main/AndroidManifest.xml
+          sed -i 's|android:label="[^"]*"|android:label="ریل‌پیما"|' "$f"
+          if [ -d android_res ]; then
+            mkdir -p android/app/src/main/res
+            cp -r android_res/. android/app/src/main/res/
+            echo "Custom launcher resources copied."
+          else
+            echo "::warning::android_res folder not found; keeping Flutter-generated launcher icons."
+          fi
+          grep -n 'android:label' "$f"
+          if [ -d android/app/src/main/res/mipmap-xxxhdpi ]; then
+            ls android/app/src/main/res/mipmap-xxxhdpi
+          fi
+
+      - name: Get packages
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: flutter pub get
+
+      - name: Build APK
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: flutter build apk --release
+
+      # اگر Secretهای کلید تعریف شده باشند، APK با کلید ثابت شما امضا می‌شود.
+      - name: Sign APK with release key
+        if: env.KS_B64 != ''
+        working-directory: ${{ steps.src.outputs.dir }}
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          "$APKSIGNER" sign --ks "$RUNNER_TEMP/release.jks" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KS_PASS --key-pass env:KEY_PASS \
+            --out "$RUNNER_TEMP/signed.apk" "$APK"
+          "$APKSIGNER" verify --print-certs "$RUNNER_TEMP/signed.apk" | head -3
+          mv "$RUNNER_TEMP/signed.apk" "$APK"
+          rm -f "$RUNNER_TEMP/release.jks"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: train-app-apk
+          path: ${{ steps.src.outputs.dir }}/build/app/outputs/flutter-apk/app-release.apk
