@@ -26,7 +26,7 @@ jobs:
           PUBSPEC=$(find "$SEARCH_ROOT" -type f -name pubspec.yaml \
             -not -path '*/.dart_tool/*' -not -path '*/build/*' -print -quit)
           if [ -z "$PUBSPEC" ]; then
-            echo 'pubspec.yaml not found. Expected train_app.zip or Flutter project files.' >&2
+            echo 'pubspec.yaml not found. Expected railpeyma_diagnostic_fixed.zip or Flutter project files.' >&2
             find . -maxdepth 4 -type f | sort | head -120
             exit 1
           fi
