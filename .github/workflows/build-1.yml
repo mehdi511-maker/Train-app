@@ -13,34 +13,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Locate source directly, inside train_app/, or inside any uploaded ZIP.
-      - name: Find and extract Flutter source
+      # اگر train_app.zip در ریشه‌ی ریپو باشد، باز می‌شود؛ وگرنه فایل‌های ریشه استفاده می‌شوند.
+      - name: Find source
         id: src
-        shell: bash
         run: |
-          set -e
-          mkdir -p _src
-          shopt -s nullglob
-          for archive in ./*.zip; do
-            echo "Extracting $archive"
-            dest="_src/$(basename "${archive%.zip}")"
-            mkdir -p "$dest"
-            unzip -q -o "$archive" -d "$dest"
-          done
-          PUBSPEC=$(find . -type f -name pubspec.yaml \
-            -not -path './.git/*' \
-            -not -path './.dart_tool/*' \
-            -print -quit)
-          if [ -z "$PUBSPEC" ]; then
-            echo "Flutter project not found. Repository contents:"
-            find . -maxdepth 4 -type f | head -100
-            echo "No pubspec.yaml was found in the repository or extracted ZIP files." >&2
-            exit 1
+          if [ -f train_app.zip ]; then
+            unzip -q -o train_app.zip -d _src
+            echo "dir=_src/train_app" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=." >> "$GITHUB_OUTPUT"
           fi
-          SRC="$(dirname "$PUBSPEC")"
-          echo "dir=$SRC" >> "$GITHUB_OUTPUT"
-          echo "Found Flutter project at: $SRC"
-          ls -la "$SRC"
 
       - uses: actions/setup-java@v4
         with:
@@ -49,58 +31,44 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.38.1"
+          channel: stable
           cache: true
 
-      - name: Create Android platform files
+      - name: Create android folder
         working-directory: ${{ steps.src.outputs.dir }}
-        run: flutter create --platforms=android --project-name train_app .
+        run: flutter create --platforms=android --org ir.railpeyma --project-name train_app .
 
-      - name: Pin Gradle wrapper
-        working-directory: ${{ steps.src.outputs.dir }}
-        run: |
-          f=android/gradle/wrapper/gradle-wrapper.properties
-          test -f "$f"
-          sed -i 's#^distributionUrl=.*#distributionUrl=https\://services.gradle.org/distributions/gradle-8.13-all.zip#' "$f"
-          grep '^distributionUrl=' "$f"
-
-      - name: Align Android Gradle Plugin and Kotlin versions
-        working-directory: ${{ steps.src.outputs.dir }}
-        shell: bash
-        run: |
-          f=android/settings.gradle
-          if [ -f "$f" ]; then
-            sed -i -E 's/(com\.android\.application" version ")[^"]+(" apply false)/\18.12.1\2/' "$f"
-            sed -i -E 's/(org\.jetbrains\.kotlin\.android" version ")[^"]+(" apply false)/\12.2.0\2/' "$f"
-          else
-            f=android/settings.gradle.kts
-            sed -i -E 's/(com\.android\.application" version ")[^"]+(" apply false)/\18.12.1\2/' "$f"
-            sed -i -E 's/(org\.jetbrains\.kotlin\.android" version ")[^"]+(" apply false)/\12.2.0\2/' "$f"
-          fi
-          grep -E 'com.android.application|org.jetbrains.kotlin.android' "$f"
-
-      - name: Set Android application id
-        working-directory: ${{ steps.src.outputs.dir }}
-        run: |
-          f=android/app/build.gradle
-          if [ -f "$f" ]; then
-            sed -i 's/applicationId "[^"]*"/applicationId "ir.railpeyma.app"/' "$f"
-          else
-            f=android/app/build.gradle.kts
-            sed -i 's/applicationId = "[^"]*"/applicationId = "ir.railpeyma.app"/' "$f"
-          fi
-
-      - name: Add INTERNET permission and app label
+      - name: Add INTERNET permission
         working-directory: ${{ steps.src.outputs.dir }}
         run: |
           f=android/app/src/main/AndroidManifest.xml
           grep -q 'android.permission.INTERNET' "$f" || \
             sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$f"
+
+      - name: Apply app name and icon
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          f=android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="[^"]*"|android:label="ریل‌پیما"|' "$f"
-          if [ -d android_res ]; then
-            mkdir -p android/app/src/main/res
-            cp -r android_res/. android/app/src/main/res/
+          cp -r android_res/. android/app/src/main/res/
+          grep -n 'android:label' "$f"
+          ls android/app/src/main/res/mipmap-xxxhdpi
+
+      - name: Apply package name and ads manifest
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          for g in android/app/build.gradle.kts android/app/build.gradle; do
+            if [ -f "$g" ]; then
+              sed -i 's|applicationId *=* *"[^"]*"|applicationId = "ir.railpeyma.app"|' "$g"
+            fi
+          done
+          grep -n 'applicationId' android/app/build.gradle*
+          grep -q 'applicationId = "ir.railpeyma.app"' android/app/build.gradle* || { echo "applicationId was not applied"; exit 1; }
+          f=android/app/src/main/AndroidManifest.xml
+          if ! grep -q 'com.google.android.gms.ads.APPLICATION_ID' "$f"; then
+            sed -i 's|</application>|    <meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="ca-app-pub-3940256099942544~3347511713"/>\n    </application>|' "$f"
           fi
+          grep -n 'APPLICATION_ID' "$f"
 
       - name: Get packages
         working-directory: ${{ steps.src.outputs.dir }}
@@ -110,6 +78,7 @@ jobs:
         working-directory: ${{ steps.src.outputs.dir }}
         run: flutter build apk --release
 
+      # اگر Secretهای کلید تعریف شده باشند، APK با کلید ثابت شما امضا می‌شود.
       - name: Sign APK with release key
         if: env.KS_B64 != ''
         working-directory: ${{ steps.src.outputs.dir }}
