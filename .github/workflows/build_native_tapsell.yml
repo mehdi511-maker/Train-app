@@ -187,7 +187,7 @@ jobs:
                                   runOnUiThread { showNativeBannerSafely(adId) }
                               }
                               override fun onFailure(message: String) {
-                                  Log.w("RailpeymaTapsell", "Banner request failed: $message")
+                                  Log.w("RailpeymaTapsell", "Banner request failed: \$message")
                               }
                           })
                   } catch (t: Throwable) {
@@ -217,7 +217,7 @@ jobs:
                           override fun onAdImpression() { Log.d("RailpeymaTapsell", "Banner impression") }
                           override fun onAdClicked() { Log.d("RailpeymaTapsell", "Banner clicked") }
                           override fun onAdFailed(message: String) {
-                              Log.w("RailpeymaTapsell", "Banner show failed: $message")
+                              Log.w("RailpeymaTapsell", "Banner show failed: \$message")
                               runOnUiThread { overlay.visibility = View.GONE }
                           }
                       })
