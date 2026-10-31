@@ -18,7 +18,7 @@ jobs:
           set -euo pipefail
           mkdir -p _src
           if [ -f railpeyma_diagnostic_fixed.zip ]; then
-            unzip -q -o train_app.zip -d _src
+            unzip -q -o railpeyma_diagnostic_fixed.zip -d _src
             SEARCH_ROOT=_src
           else
             SEARCH_ROOT=.
@@ -47,7 +47,7 @@ jobs:
 
       - name: Generate Android project
         working-directory: ${{ steps.src.outputs.dir }}
-        run: flutter create --platforms=android --project-name train_app .
+        run: flutter create --platforms=android --project-name railpeyma_diagnostic_fixed .
 
       - name: Configure Android Gradle versions
         working-directory: ${{ steps.src.outputs.dir }}
