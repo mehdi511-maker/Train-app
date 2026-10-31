@@ -25,7 +25,9 @@ jobs:
         run: |
           if [ -f train_app.zip ]; then
             unzip -q -o train_app.zip -d _src
-            echo "dir=_src/train_app" >> "$GITHUB_OUTPUT"
+            P=$(find _src -name pubspec.yaml -not -path '*/.*' | head -1)
+            [ -n "$P" ] || { echo "pubspec.yaml not found in train_app.zip"; exit 1; }
+            echo "dir=$(dirname "$P")" >> "$GITHUB_OUTPUT"
           else
             echo "dir=." >> "$GITHUB_OUTPUT"
           fi
@@ -56,9 +58,14 @@ jobs:
         run: |
           f=android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="[^"]*"|android:label="ریل‌پیما"|' "$f"
-          cp -r android_res/. android/app/src/main/res/
+          if [ -d android_res ]; then
+            cp -r android_res/. android/app/src/main/res/
+          else
+            echo "WARNING: android_res folder not found; default icon will be used"
+            ls -la
+          fi
           grep -n 'android:label' "$f"
-          ls android/app/src/main/res/mipmap-xxxhdpi
+          ls android/app/src/main/res/mipmap-xxxhdpi || true
 
       - name: Apply package name and ads manifest
         working-directory: ${{ steps.src.outputs.dir }}
