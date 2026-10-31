@@ -49,7 +49,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.24.5"
+          flutter-version: "3.38.1"
           cache: true
 
       - name: Create Android platform files
@@ -61,8 +61,23 @@ jobs:
         run: |
           f=android/gradle/wrapper/gradle-wrapper.properties
           test -f "$f"
-          sed -i 's#^distributionUrl=.*#distributionUrl=https\://services.gradle.org/distributions/gradle-8.3-all.zip#' "$f"
+          sed -i 's#^distributionUrl=.*#distributionUrl=https\://services.gradle.org/distributions/gradle-8.13-all.zip#' "$f"
           grep '^distributionUrl=' "$f"
+
+      - name: Align Android Gradle Plugin and Kotlin versions
+        working-directory: ${{ steps.src.outputs.dir }}
+        shell: bash
+        run: |
+          f=android/settings.gradle
+          if [ -f "$f" ]; then
+            sed -i -E 's/(com\.android\.application" version ")[^"]+(" apply false)/\18.12.1\2/' "$f"
+            sed -i -E 's/(org\.jetbrains\.kotlin\.android" version ")[^"]+(" apply false)/\12.2.0\2/' "$f"
+          else
+            f=android/settings.gradle.kts
+            sed -i -E 's/(com\.android\.application" version ")[^"]+(" apply false)/\18.12.1\2/' "$f"
+            sed -i -E 's/(org\.jetbrains\.kotlin\.android" version ")[^"]+(" apply false)/\12.2.0\2/' "$f"
+          fi
+          grep -E 'com.android.application|org.jetbrains.kotlin.android' "$f"
 
       - name: Set Android application id
         working-directory: ${{ steps.src.outputs.dir }}
