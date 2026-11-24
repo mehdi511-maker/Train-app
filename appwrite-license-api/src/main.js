@@ -1,3 +1,4 @@
+
 import { Client, TablesDB, Query } from "node-appwrite";
 import crypto from "node:crypto";
 
@@ -5,19 +6,13 @@ const DATABASE_ID = "train_license_db";
 const LICENSES_TABLE_ID = "licenses";
 const BINDINGS_TABLE_ID = "license_bindings";
 
-function jsonError(res, status, message) {
-  return new Response(
-    JSON.stringify({
-      success: false,
-      message
-    }),
-    {
-      status,
-      headers: {
-        "Content-Type": "application/json; charset=utf-8"
-      }
+function jsonResponse(status, data) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8"
     }
-  );
+  });
 }
 
 function hashValue(value, pepper) {
@@ -27,7 +22,44 @@ function hashValue(value, pepper) {
     .digest("hex");
 }
 
-export default async ({ req, res, log, error }) => {
+function getHeader(headers, name) {
+  const wanted = name.toLowerCase();
+
+  for (const [key, value] of Object.entries(headers || {})) {
+    if (key.toLowerCase() === wanted) {
+      return String(value);
+    }
+  }
+
+  return "";
+}
+
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a), "utf8");
+  const right = Buffer.from(String(b), "utf8");
+
+  return (
+    left.length === right.length &&
+    crypto.timingSafeEqual(left, right)
+  );
+}
+
+async function getBinding(tables, licenseId) {
+  try {
+    return await tables.getRow({
+      databaseId: DATABASE_ID,
+      tableId: BINDINGS_TABLE_ID,
+      rowId: licenseId
+    });
+  } catch (e) {
+    if (Number(e?.code) === 404) {
+      return null;
+    }
+    throw e;
+  }
+}
+
+export default async ({ req, log, error }) => {
   try {
     const endpoint =
       process.env.APPWRITE_FUNCTION_API_ENDPOINT;
@@ -41,40 +73,26 @@ export default async ({ req, res, log, error }) => {
     const pepper =
       process.env.CODE_PEPPER;
 
-    if (!endpoint || !projectId || !apiKey || !pepper) {
+    const adminSecret =
+      process.env.ADMIN_SECRET;
+
+    if (
+      !endpoint ||
+      !projectId ||
+      !apiKey ||
+      !pepper ||
+      !adminSecret
+    ) {
       error("Missing required environment variables.");
 
-      return jsonError(
-        res,
-        500,
-        "سرویس موقتاً در دسترس نیست"
-      );
+      return jsonResponse(500, {
+        success: false,
+        message: "سرویس موقتاً در دسترس نیست"
+      });
     }
 
     const body = req.bodyJson || {};
-
-    const action = String(body.action || "");
-    const code = String(body.code || "").trim();
-    const deviceId = String(body.device_id || "").trim();
-
-    if (!["activate", "validate"].includes(action)) {
-      return jsonError(
-        res,
-        400,
-        "درخواست نامعتبر است"
-      );
-    }
-
-    if (
-      !/^[A-Za-z0-9-]{8,64}$/.test(code) ||
-      !/^[A-Za-z0-9_-]{8,128}$/.test(deviceId)
-    ) {
-      return jsonError(
-        res,
-        400,
-        "کد یا شناسه دستگاه نامعتبر است"
-      );
-    }
+    const action = String(body.action || "").trim();
 
     const client = new Client()
       .setEndpoint(endpoint)
@@ -83,10 +101,208 @@ export default async ({ req, res, log, error }) => {
 
     const tables = new TablesDB(client);
 
+    // -------------------------------
+    // ADMIN ACTIONS
+    // -------------------------------
+
+    if (action.startsWith("admin_")) {
+      const suppliedSecret = getHeader(
+        req.headers,
+        "x-admin-secret"
+      );
+
+      if (!safeEqual(suppliedSecret, adminSecret)) {
+        return jsonResponse(401, {
+          success: false,
+          message: "دسترسی مدیریتی مجاز نیست"
+        });
+      }
+
+      // CREATE LICENSE
+      if (action === "admin_create") {
+        let expiresAt = null;
+
+        if (body.expires_at) {
+          expiresAt = String(body.expires_at);
+
+          const expiryTime = new Date(expiresAt).getTime();
+
+          if (
+            !Number.isFinite(expiryTime) ||
+            expiryTime <= Date.now()
+          ) {
+            return jsonResponse(400, {
+              success: false,
+              message: "تاریخ انقضا نامعتبر است"
+            });
+          }
+        }
+
+        const code =
+          "TRN-" +
+          crypto.randomBytes(16).toString("hex").toUpperCase();
+
+        const licenseId = crypto.randomUUID();
+
+        await tables.createRow({
+          databaseId: DATABASE_ID,
+          tableId: LICENSES_TABLE_ID,
+          rowId: licenseId,
+          data: {
+            code_hash: hashValue(code, pepper),
+            status: "active",
+            expires_at: expiresAt
+          }
+        });
+
+        return jsonResponse(201, {
+          success: true,
+          message: "کد فعال‌سازی ساخته شد",
+          code,
+          license_id: licenseId,
+          expires_at: expiresAt
+        });
+      }
+
+      // LIST LICENSES
+      if (action === "admin_list") {
+        const result = await tables.listRows({
+          databaseId: DATABASE_ID,
+          tableId: LICENSES_TABLE_ID,
+          queries: [
+            Query.orderDesc("$createdAt"),
+            Query.limit(100)
+          ]
+        });
+
+        return jsonResponse(200, {
+          success: true,
+          licenses: (result.rows || []).map((row) => ({
+            license_id: row.$id,
+            status: row.status,
+            created_at: row.$createdAt,
+            expires_at: row.expires_at || null
+          }))
+        });
+      }
+
+      // BLOCK OR UNBLOCK
+      if (
+        action === "admin_block" ||
+        action === "admin_unblock"
+      ) {
+        const licenseId = String(
+          body.license_id || ""
+        ).trim();
+
+        if (
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/.test(licenseId)
+        ) {
+          return jsonResponse(400, {
+            success: false,
+            message: "شناسه مجوز نامعتبر است"
+          });
+        }
+
+        const status =
+          action === "admin_block"
+            ? "blocked"
+            : "active";
+
+        await tables.updateRow({
+          databaseId: DATABASE_ID,
+          tableId: LICENSES_TABLE_ID,
+          rowId: licenseId,
+          data: { status }
+        });
+
+        return jsonResponse(200, {
+          success: true,
+          message:
+            status === "blocked"
+              ? "کد مسدود شد"
+              : "کد دوباره فعال شد",
+          license_id: licenseId,
+          status
+        });
+      }
+
+      // RESET DEVICE
+      if (action === "admin_reset_device") {
+        const licenseId = String(
+          body.license_id || ""
+        ).trim();
+
+        if (
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/.test(licenseId)
+        ) {
+          return jsonResponse(400, {
+            success: false,
+            message: "شناسه مجوز نامعتبر است"
+          });
+        }
+
+        const binding = await getBinding(
+          tables,
+          licenseId
+        );
+
+        if (!binding) {
+          return jsonResponse(404, {
+            success: false,
+            message: "این کد به دستگاهی متصل نیست"
+          });
+        }
+
+        await tables.deleteRow({
+          databaseId: DATABASE_ID,
+          tableId: BINDINGS_TABLE_ID,
+          rowId: licenseId
+        });
+
+        return jsonResponse(200, {
+          success: true,
+          message:
+            "اتصال دستگاه قبلی حذف شد؛ کد آماده فعال‌سازی روی دستگاه جدید است",
+          license_id: licenseId
+        });
+      }
+
+      return jsonResponse(400, {
+        success: false,
+        message: "عملیات مدیریتی نامعتبر است"
+      });
+    }
+
+    // -------------------------------
+    // PUBLIC ACTIVATION / VALIDATION
+    // -------------------------------
+
+    if (!["activate", "validate"].includes(action)) {
+      return jsonResponse(400, {
+        success: false,
+        message: "درخواست نامعتبر است"
+      });
+    }
+
+    const code = String(body.code || "").trim();
+    const deviceId = String(
+      body.device_id || ""
+    ).trim();
+
+    if (
+      !/^[A-Za-z0-9-]{8,64}$/.test(code) ||
+      !/^[A-Za-z0-9_-]{8,128}$/.test(deviceId)
+    ) {
+      return jsonResponse(400, {
+        success: false,
+        message: "کد یا شناسه دستگاه نامعتبر است"
+      });
+    }
+
     const codeHash = hashValue(code, pepper);
     const deviceHash = hashValue(deviceId, pepper);
 
-    // Find license by its HMAC hash.
     const result = await tables.listRows({
       databaseId: DATABASE_ID,
       tableId: LICENSES_TABLE_ID,
@@ -97,21 +313,19 @@ export default async ({ req, res, log, error }) => {
     });
 
     if (!result.rows || result.rows.length === 0) {
-      return jsonError(
-        res,
-        403,
-        "کد معتبر نیست یا قابل استفاده نیست"
-      );
+      return jsonResponse(403, {
+        success: false,
+        message: "کد معتبر نیست یا قابل استفاده نیست"
+      });
     }
 
     const license = result.rows[0];
 
     if (license.status !== "active") {
-      return jsonError(
-        res,
-        403,
-        "کد معتبر نیست یا قابل استفاده نیست"
-      );
+      return jsonResponse(403, {
+        success: false,
+        message: "کد معتبر نیست یا قابل استفاده نیست"
+      });
     }
 
     if (license.expires_at) {
@@ -123,31 +337,19 @@ export default async ({ req, res, log, error }) => {
         !Number.isFinite(expiry) ||
         expiry <= Date.now()
       ) {
-        return jsonError(
-          res,
-          403,
-          "اعتبار کد به پایان رسیده است"
-        );
+        return jsonResponse(403, {
+          success: false,
+          message: "اعتبار کد به پایان رسیده است"
+        });
       }
     }
 
-    // Each license can have only one binding row.
-    // The license row ID is used as the binding row ID.
-    let binding = null;
+    let binding = await getBinding(
+      tables,
+      license.$id
+    );
 
-    try {
-      binding = await tables.getRow({
-        databaseId: DATABASE_ID,
-        tableId: BINDINGS_TABLE_ID,
-        rowId: license.$id
-      });
-    } catch (e) {
-      if (e.code !== 404) {
-        throw e;
-      }
-    }
-
-    // First activation claims the unique binding row.
+    // First activation claims the license.
     if (!binding && action === "activate") {
       try {
         binding = await tables.createRow({
@@ -160,36 +362,32 @@ export default async ({ req, res, log, error }) => {
           }
         });
       } catch (e) {
-        // Another simultaneous request may have claimed it.
-        if (e.code !== 409) {
+        if (Number(e?.code) !== 409) {
           throw e;
         }
 
-        binding = await tables.getRow({
-          databaseId: DATABASE_ID,
-          tableId: BINDINGS_TABLE_ID,
-          rowId: license.$id
-        });
+        binding = await getBinding(
+          tables,
+          license.$id
+        );
       }
     }
 
     if (!binding) {
-      return jsonError(
-        res,
-        403,
-        "این کد هنوز فعال نشده است"
-      );
+      return jsonResponse(403, {
+        success: false,
+        message: "این کد هنوز فعال نشده است"
+      });
     }
 
     if (binding.device_hash !== deviceHash) {
-      return jsonError(
-        res,
-        403,
-        "این کد روی دستگاه دیگری فعال شده است"
-      );
+      return jsonResponse(403, {
+        success: false,
+        message: "این کد روی دستگاه دیگری فعال شده است"
+      });
     }
 
-    return res.json({
+    return jsonResponse(200, {
       success: true,
       message:
         action === "activate"
@@ -200,11 +398,9 @@ export default async ({ req, res, log, error }) => {
   } catch (e) {
     error(e?.stack || e?.message || String(e));
 
-    return jsonError(
-      res,
-      500,
-      "خطای داخلی سرور"
-    );
+    return jsonResponse(500, {
+      success: false,
+      message: "خطای داخلی سرور"
+    });
   }
 };
-
