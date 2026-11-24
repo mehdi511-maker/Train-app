@@ -6,9 +6,17 @@ const LICENSES_TABLE_ID = "licenses";
 const BINDINGS_TABLE_ID = "license_bindings";
 
 function jsonError(res, status, message) {
-  return res.json(
-    { success: false, message },
-    status
+  return new Response(
+    JSON.stringify({
+      success: false,
+      message
+    }),
+    {
+      status,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8"
+      }
+    }
   );
 }
 
