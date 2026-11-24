@@ -1,4 +1,3 @@
-
 import { Client, TablesDB, Query } from "node-appwrite";
 import crypto from "node:crypto";
 
