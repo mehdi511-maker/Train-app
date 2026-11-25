@@ -227,13 +227,61 @@ export default async ({ req, log, error }) => {
         });
       }
 
-      if (action === "admin_reset_device") {
-        const licenseId = String(body.license_id || "").trim();
-        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/.test(licenseId)) {
-          return jsonResponse(400, {
-            success: false,
-            message: "شناسه مجوز نامعتبر است"
-          });
+      {
+  "$id": "6b06c1f6d49ecada7943",
+  "$createdAt": "2026-11-25T11:09:42.873+00:00",
+  "$updatedAt": "2026-11-25T11:09:42.873+00:00",
+  "$permissions": [],
+  "resourceId": "6b05aa12002ce1af12a5",
+  "resourceType": "functions",
+  "deploymentId": "6b05e6ac1c2991e90f4e",
+  "requestMethod": "post",
+  "requestPath": "/",
+  "requestHeaders": [
+    {
+      "name": "host",
+      "value": "train-app.sgp.appwrite.run"
+    },
+    {
+      "name": "user-agent",
+      "value": "Dart/3.14 (dart:io)"
+    },
+    {
+      "name": "content-length",
+      "value": "73"
+    },
+    {
+      "name": "content-type",
+      "value": "application/json"
+    }
+  ],
+  "responseStatusCode": 400,
+  "responseBody": "",
+  "responseHeaders": [
+    {
+      "name": "content-type",
+      "value": "application/json; charset=utf-8"
+    }
+  ],
+  "logs": "",
+  "errors": "",
+  "duration": 3.9284608364105225,
+  "trigger": "http",
+  "status": "completed",
+  "scheduledAt": null
+      }const codeValid =
+  /^(?:\d{7,10}|[A-Za-z0-9-]{8,64})$/.test(code);
+
+const deviceValid =
+  /^[A-Za-z0-9_-]{8,128}$/.test(deviceId);
+
+log(
+  `ACTIVATE_CHECK code_length=${code.length} code_valid=${codeValid} device_length=${deviceId.length} device_valid=${deviceValid}`
+);
+
+if (!codeValid || !deviceValid) {
+  return error(400, 'کد یا شناسه دستگاه نامعتبر است');
+}
         }
 
         const binding = await getBinding(tables, licenseId);
