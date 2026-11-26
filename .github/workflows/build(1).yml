@@ -1,0 +1,213 @@
+name: Build Android APK + Bazaar AAB/BIN
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ads:
+        description: "ساخت با تبلیغ تپسل"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+      KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+      ADS: ${{ inputs.ads && 'true' || 'false' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find source
+        id: src
+        shell: bash
+        run: |
+          if [ -f train_app.zip ]; then
+            unzip -q -o train_app.zip -d _src
+            P=$(find _src -name pubspec.yaml -not -path '*/.*' | head -1)
+            [ -n "$P" ] || { echo "pubspec.yaml not found in train_app.zip"; exit 1; }
+            echo "dir=$(dirname "$P")" >> "$GITHUB_OUTPUT"
+          elif [ -f pubspec.yaml ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          else
+            echo "ERROR: train_app.zip or root pubspec.yaml is missing."
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Validate release key
+        shell: bash
+        run: |
+          [ -n "$KS_B64" ] && [ -n "$KS_PASS" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASS" ] || {
+            echo "Set existing GitHub secrets: KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD"; exit 1;
+          }
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          test -s "$RUNNER_TEMP/release.jks"
+          echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          keytool -list -keystore "$RUNNER_TEMP/release.jks" -storepass "$KS_PASS" -alias "$KEY_ALIAS" >/dev/null
+
+      - name: Create Android project
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: flutter create --platforms=android --org ir.railpeyma --project-name train_app .
+
+      - name: Apply app identity and internet permission
+        working-directory: ${{ steps.src.outputs.dir }}
+        shell: bash
+        run: |
+          f=android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.INTERNET' "$f" || sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$f"
+          sed -i 's|android:label="[^"]*"|android:label="ریل‌پیما"|' "$f"
+          if [ -d android_res ]; then cp -r android_res/. android/app/src/main/res/; fi
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i 's|applicationId *=* *"[^"]*"|applicationId = "ir.railpeyma.app"|' android/app/build.gradle.kts
+          elif [ -f android/app/build.gradle ]; then
+            sed -i "s|applicationId[[:space:]]*['\"][^'\"]*['\"]|applicationId 'ir.railpeyma.app'|" android/app/build.gradle
+          else
+            echo "App Gradle file not found"; exit 1
+          fi
+
+      - name: Configure release signing
+        working-directory: ${{ steps.src.outputs.dir }}
+        shell: bash
+        run: |
+          export RELEASE_STORE_FILE="$RUNNER_TEMP/release.jks"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          kts = Path("android/app/build.gradle.kts")
+          groovy = Path("android/app/build.gradle")
+          if kts.exists():
+              p = kts
+              block = '''
+              signingConfigs {
+                  create("bazaarRelease") {
+                      storeFile = file(System.getenv("RELEASE_STORE_FILE")!!)
+                      storePassword = System.getenv("KS_PASS")
+                      keyAlias = System.getenv("KEY_ALIAS")
+                      keyPassword = System.getenv("KEY_PASS")
+                  }
+              }
+          '''
+              s = p.read_text()
+              if 'create("bazaarRelease")' not in s:
+                  s, n = re.subn(r'android\s*\{', lambda m: m.group(0) + block, s, count=1)
+                  if n != 1: raise SystemExit("Cannot add signingConfigs to Kotlin Gradle file")
+              s, n = re.subn(r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)',
+                             'signingConfig = signingConfigs.getByName("bazaarRelease")', s)
+              if n == 0 and 'signingConfig = signingConfigs.getByName("bazaarRelease")' not in s:
+                  raise SystemExit("Cannot configure release signing in Kotlin Gradle file")
+              p.write_text(s)
+          elif groovy.exists():
+              p = groovy
+              block = '''
+              signingConfigs {
+                  bazaarRelease {
+                      storeFile file(System.getenv("RELEASE_STORE_FILE"))
+                      storePassword System.getenv("KS_PASS")
+                      keyAlias System.getenv("KEY_ALIAS")
+                      keyPassword System.getenv("KEY_PASS")
+                  }
+              }
+          '''
+              s = p.read_text()
+              if 'bazaarRelease' not in s:
+                  s, n = re.subn(r'android\s*\{', lambda m: m.group(0) + block, s, count=1)
+                  if n != 1: raise SystemExit("Cannot add signingConfigs to Groovy Gradle file")
+              s, n = re.subn(r'signingConfig\s+signingConfigs\.debug',
+                             'signingConfig signingConfigs.bazaarRelease', s)
+              if n == 0 and 'signingConfig signingConfigs.bazaarRelease' not in s:
+                  raise SystemExit("Cannot configure release signing in Groovy Gradle file")
+              p.write_text(s)
+          else:
+              raise SystemExit("Android app Gradle file missing")
+          print("Release signing configured.")
+          PY
+
+      - name: Enable native Tapsell ads
+        if: env.ADS == 'true'
+        working-directory: ${{ steps.src.outputs.dir }}
+        shell: bash
+        run: |
+          f=android/app/src/main/AndroidManifest.xml
+          grep -q 'com.google.android.gms.ads.APPLICATION_ID' "$f" || sed -i 's|</application>|    <meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="ca-app-pub-3940256099942544~3347511713"/>\n    </application>|' "$f"
+          MA=$(find android/app/src/main -name 'MainActivity.*' | head -1)
+          [ -n "$MA" ] || { echo "MainActivity not found"; exit 1; }
+          PKG=$(grep -m1 '^package' "$MA" | sed -e 's/^package *//' -e 's/;.*$//' | tr -d '\r ')
+          rm -f "$MA"
+          KDIR="android/app/src/main/kotlin/${PKG//./\/}"
+          JDIR="android/app/src/main/java/${PKG//./\/}"
+          mkdir -p "$KDIR" "$JDIR"
+          sed "s/__PKG__/$PKG/" android_native/MainActivity.kt.tpl > "$KDIR/MainActivity.kt"
+          sed "s/__PKG__/$PKG/" android_native/TapsellBridge.java.tpl > "$JDIR/TapsellBridge.java"
+          if [ -f android/app/build.gradle.kts ]; then
+            printf '\ndependencies {\n    implementation("ir.tapsell.plus:tapsell-plus-sdk-android:2.3.2")\n}\n' >> android/app/build.gradle.kts
+          else
+            printf "\ndependencies {\n    implementation 'ir.tapsell.plus:tapsell-plus-sdk-android:2.3.2'\n}\n" >> android/app/build.gradle
+          fi
+
+      - name: Get packages
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: flutter pub get
+
+      - name: Build APK and AAB
+        working-directory: ${{ steps.src.outputs.dir }}
+        shell: bash
+        run: |
+          EXTRA=""
+          [ "$ADS" = "true" ] && EXTRA="--no-shrink"
+          flutter build apk --release --dart-define=ADS=$ADS $EXTRA
+          flutter build appbundle --release --dart-define=ADS=$ADS $EXTRA
+
+      - name: Verify and generate Bazaar BIN
+        working-directory: ${{ steps.src.outputs.dir }}
+        shell: bash
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          AAB="build/app/outputs/bundle/release/app-release.aab"
+          test -s "$APK" && test -s "$AAB"
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs "$APK" > "$RUNNER_TEMP/apk-cert.txt"
+          jarsigner -verify "$AAB" >/dev/null
+
+          curl --fail --location --retry 3 "https://github.com/cafebazaar/bundle-signer/releases/download/v0.1.14/bundlesigner-0.1.14.jar" -o "$RUNNER_TEMP/bundlesigner.jar"
+          mkdir -p "$RUNNER_TEMP/bazaar-bin"
+          java -jar "$RUNNER_TEMP/bundlesigner.jar" genbin -v \
+            --bundle "$AAB" --bin "$RUNNER_TEMP/bazaar-bin" \
+            --v2-signing-enabled true --v3-signing-enabled false \
+            --ks "$RUNNER_TEMP/release.jks" --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass "env:KS_PASS" --key-pass "env:KEY_PASS"
+
+          BIN=$(find "$RUNNER_TEMP/bazaar-bin" -maxdepth 1 -type f -name '*.bin' | head -1)
+          [ -n "$BIN" ] && [ -s "$BIN" ] || { echo "BIN generation failed"; exit 1; }
+          mkdir -p dist
+          cp "$APK" dist/app-release.apk
+          cp "$AAB" dist/app-release.aab
+          cp "$BIN" dist/app-release.bin
+          ls -lh dist/app-release.apk dist/app-release.aab dist/app-release.bin
+          rm -f "$RUNNER_TEMP/release.jks" "$RUNNER_TEMP/bundlesigner.jar"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: train-app-bazaar-release
+          path: |
+            ${{ steps.src.outputs.dir }}/dist/app-release.apk
+            ${{ steps.src.outputs.dir }}/dist/app-release.aab
+            ${{ steps.src.outputs.dir }}/dist/app-release.bin
+          if-no-files-found: error
